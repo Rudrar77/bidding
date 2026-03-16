@@ -1,23 +1,16 @@
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import ThreeHero from "@/components/ThreeHero";
+import AuctionShowcase from "@/components/AuctionShowcase";
 import { motion } from "framer-motion";
-import { Gavel, Shield, Zap, BarChart3, Coins, Users, ArrowRight } from "lucide-react";
+import { Gavel, Shield, Zap, BarChart3, Coins, Users, ArrowRight, TrendingUp } from "lucide-react";
 
 const features = [
   { icon: Gavel, title: "Live Auctions", desc: "Real-time bidding with instant updates and countdown timers." },
   { icon: Coins, title: "Credit System", desc: "Transparent credit management with automatic refunds for outbid participants." },
   { icon: Shield, title: "Secure Platform", desc: "Role-based access control with admin and bidder authentication." },
   { icon: Zap, title: "Instant Notifications", desc: "Get alerted when you're outbid or win an auction." },
-  { icon: BarChart3, title: "Analytics Dashboard", desc: "Comprehensive auction analytics with heatmaps and visualizations." },
+  { icon: BarChart3, title: "Analytics Dashboard", desc: "Comprehensive auction analytics with real-time visualizations." },
   { icon: Users, title: "Multi-Role System", desc: "Dedicated panels for admins and bidders with tailored experiences." },
-];
-
-const stats = [
-  { value: "10K+", label: "Active Bidders" },
-  { value: "$2.5M", label: "Total Volume" },
-  { value: "500+", label: "Auctions Completed" },
-  { value: "99.9%", label: "Uptime" },
 ];
 
 export default function Landing() {
@@ -25,11 +18,25 @@ export default function Landing() {
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Hero */}
-      <section className="relative min-h-screen flex items-center justify-center overflow-hidden">
-        <ThreeHero />
-        <div className="relative z-10 container mx-auto px-4 text-center">
-          <motion.div initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.8 }}>
+      {/* Hero Section */}
+      <section className="relative py-20 md:py-32 overflow-hidden">
+        <div className="absolute inset-0">
+          <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-accent/5" />
+          <motion.div
+            className="absolute -top-40 -right-40 w-80 h-80 bg-primary/10 rounded-full blur-3xl"
+            animate={{ x: [0, 30, 0], y: [0, 40, 0] }}
+            transition={{ duration: 8, repeat: Infinity }}
+          />
+          <motion.div
+            className="absolute -bottom-40 -left-40 w-80 h-80 bg-accent/10 rounded-full blur-3xl"
+            animate={{ x: [0, -30, 0], y: [0, -40, 0] }}
+            transition={{ duration: 10, repeat: Infinity }}
+          />
+        </div>
+
+        <div className="relative z-10 container mx-auto px-4">
+          {/* Hero Text Content */}
+          <motion.div initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.8 }} className="text-center mb-16 md:mb-20">
             <div className="inline-flex items-center gap-2 bg-primary/10 border border-primary/20 rounded-full px-4 py-1.5 mb-8">
               <span className="w-2 h-2 rounded-full bg-primary animate-pulse" />
               <span className="text-sm text-primary font-medium">Live Auctions Running Now</span>
@@ -51,25 +58,15 @@ export default function Landing() {
               </Button>
             </div>
           </motion.div>
-        </div>
-        <div className="absolute bottom-0 left-0 right-0 h-32 bg-gradient-to-t from-background to-transparent" />
-      </section>
 
-      {/* Stats */}
-      <section className="py-16 border-y border-border/50">
-        <div className="container mx-auto px-4">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
-            {stats.map((stat, i) => (
-              <motion.div key={stat.label} initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ delay: i * 0.1 }} className="text-center">
-                <p className="text-3xl md:text-4xl font-bold gradient-gold-text">{stat.value}</p>
-                <p className="text-sm text-muted-foreground mt-1">{stat.label}</p>
-              </motion.div>
-            ))}
-          </div>
+          {/* Live Auctions Display */}
+          <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.8, delay: 0.2 }} className="max-w-6xl mx-auto">
+            <AuctionShowcase />
+          </motion.div>
         </div>
       </section>
 
-      {/* Features */}
+      {/* Features Section */}
       <section className="py-24">
         <div className="container mx-auto px-4">
           <motion.div initial={{ opacity: 0 }} whileInView={{ opacity: 1 }} viewport={{ once: true }} className="text-center mb-16">
@@ -82,7 +79,14 @@ export default function Landing() {
           </motion.div>
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
             {features.map((f, i) => (
-              <motion.div key={f.title} initial={{ opacity: 0, y: 20 }} whileInView={{ opacity: 1, y: 0 }} viewport={{ once: true }} transition={{ delay: i * 0.1 }} className="glass-card p-6 group hover:border-primary/30 transition-colors">
+              <motion.div
+                key={f.title}
+                initial={{ opacity: 0, y: 20 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ delay: i * 0.1 }}
+                className="glass-card p-6 group hover:border-primary/30 transition-colors"
+              >
                 <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4 group-hover:bg-primary/20 transition-colors">
                   <f.icon className="w-6 h-6 text-primary" />
                 </div>
@@ -94,10 +98,10 @@ export default function Landing() {
         </div>
       </section>
 
-      {/* CTA */}
+      {/* CTA Section */}
       <section className="py-24">
         <div className="container mx-auto px-4">
-          <div className="glass-card p-12 md:p-16 text-center relative overflow-hidden">
+          <motion.div initial={{ opacity: 0, scale: 0.95 }} whileInView={{ opacity: 1, scale: 1 }} viewport={{ once: true }} className="glass-card p-12 md:p-16 text-center relative overflow-hidden">
             <div className="absolute inset-0 bg-gradient-to-br from-primary/5 to-accent/5" />
             <div className="relative z-10">
               <h2 className="text-3xl md:text-5xl font-bold mb-4">Ready to Start Bidding?</h2>
@@ -108,7 +112,7 @@ export default function Landing() {
                 Create Your Account <ArrowRight className="w-5 h-5 ml-2" />
               </Button>
             </div>
-          </div>
+          </motion.div>
         </div>
       </section>
 
@@ -116,12 +120,21 @@ export default function Landing() {
       <footer className="border-t border-border/50 py-8">
         <div className="container mx-auto px-4 flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded gradient-gold-bg flex items-center justify-center">
-              <Gavel className="w-3 h-3 text-primary-foreground" />
-            </div>
-            <span className="font-semibold">CodeBidz</span>
+            <Gavel className="w-6 h-6 text-primary" />
+            <span className="font-bold text-lg">Bid Brilliance</span>
           </div>
-          <p className="text-sm text-muted-foreground">© 2026 CodeBidz. Built for the hackathon.</p>
+          <p className="text-sm text-muted-foreground">&copy; 2026 Bid Brilliance. All rights reserved.</p>
+          <div className="flex gap-4">
+            <a href="#" className="text-sm text-muted-foreground hover:text-primary transition-colors">
+              Privacy
+            </a>
+            <a href="#" className="text-sm text-muted-foreground hover:text-primary transition-colors">
+              Terms
+            </a>
+            <a href="#" className="text-sm text-muted-foreground hover:text-primary transition-colors">
+              Contact
+            </a>
+          </div>
         </div>
       </footer>
     </div>

@@ -14,7 +14,7 @@ export default function Register() {
   const [password, setPassword] = useState("");
   const [role, setRole] = useState<UserRole>("bidder");
   const [loading, setLoading] = useState(false);
-  const { register } = useAuth();
+  const { register, loginError } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -24,8 +24,15 @@ export default function Register() {
     const success = await register(name, email, password, role);
     setLoading(false);
     if (success) {
-      toast({ title: "Account created!", description: `Welcome to CodeBidz, ${name}` });
-      navigate(role === "admin" ? "/admin" : "/dashboard");
+      toast({ title: "Account created!", description: `Welcome to Bid Brilliance, ${name}` });
+      if (role === "admin") navigate("/admin");
+      else navigate("/dashboard");
+    } else {
+      toast({
+        title: "Registration Failed",
+        description: loginError || "Could not create account. Please try again.",
+        variant: "destructive",
+      });
     }
   };
 
@@ -37,7 +44,7 @@ export default function Register() {
             <Gavel className="w-7 h-7 text-primary-foreground" />
           </div>
           <h1 className="text-3xl font-bold">Create Account</h1>
-          <p className="text-muted-foreground mt-2">Join CodeBidz and start bidding</p>
+          <p className="text-muted-foreground mt-2">Join Bid Brilliance and start your auction journey</p>
         </div>
 
         <div className="glass-card p-6 space-y-6">
@@ -45,17 +52,17 @@ export default function Register() {
           <div className="grid grid-cols-2 gap-3">
             {([
               { value: "bidder" as UserRole, icon: User, label: "Bidder", desc: "Place bids on auctions" },
-              { value: "admin" as UserRole, icon: Shield, label: "Admin", desc: "Manage auctions & users" },
+              { value: "admin" as UserRole, icon: Shield, label: "Admin", desc: "Manage the platform" },
             ]).map((r) => (
               <button
                 key={r.value}
                 type="button"
                 onClick={() => setRole(r.value)}
-                className={`p-4 rounded-xl border text-left transition-all ${role === r.value ? "border-primary bg-primary/10" : "border-border bg-secondary hover:border-muted-foreground/30"}`}
+                className={`p-3 rounded-xl border text-left transition-all ${role === r.value ? "border-primary bg-primary/10" : "border-border bg-secondary hover:border-muted-foreground/30"}`}
               >
                 <r.icon className={`w-5 h-5 mb-2 ${role === r.value ? "text-primary" : "text-muted-foreground"}`} />
                 <p className="font-semibold text-sm">{r.label}</p>
-                <p className="text-xs text-muted-foreground">{r.desc}</p>
+                <p className="text-[10px] text-muted-foreground leading-tight">{r.desc}</p>
               </button>
             ))}
           </div>
