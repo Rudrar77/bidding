@@ -1,3 +1,4 @@
+
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import * as queries from '../services/queries.js';
@@ -184,6 +185,9 @@ router.post('/place', verifyToken, async (req, res) => {
     // Update bid with credits deducted
     await queries.updateBidCreditsDeducted(bidId, bidAmount);
 
+    // Get the created bid with all details for real-time updates
+    const createdBid = await queries.getBidById(bidId);
+
     // Handle outbid logic - return credits to previous highest bidder
     if (highestBid && highestBid.bidder_id !== bidderId) {
       // Return the outbid user's credits
@@ -293,6 +297,25 @@ router.post('/proxy/set', verifyToken, async (req, res) => {
     // Check if auction has ended
     if (new Date(auction.auction_end_time) < new Date()) {
       return res.status(400).json({ error: 'Auction has ended' });
+    }
+
+    // Check if user is already the current highest bidder - prevent proxy bids
+    const highestBid = await queries.getHighestBid(auctionId);
+    if (highestBid && highestBid.bidder_id === bidderId) {
+      return res.status(400).json({ 
+        error: `You are already the highest bidder with ${highestBid.bid_amount} CR. You cannot set a proxy bid on this auction.`,
+        currentBid: highestBid.bid_amount,
+        isCurrentLeader: true
+      });
+    }
+
+    // Additional check: prevent proxy bids if user is current highest bidder in auction record
+    if (auction.current_highest_bidder_id === bidderId) {
+      return res.status(400).json({ 
+        error: `You are currently the highest bidder. You cannot set a proxy bid on this auction.`,
+        currentBid: auction.current_bid || auction.current_bid_price || 0,
+        isCurrentLeader: true
+      });
     }
 
     // Validate max bid against starting price
@@ -435,6 +458,17 @@ router.post('/place-locked', verifyToken, async (req, res) => {
       return res.status(400).json({ 
         error: `You are already the highest bidder with ${highestBid.bid_amount} CR. You cannot place another bid on this auction.`,
         currentBid: highestBid.bid_amount,
+        isCurrentLeader: true
+      });
+    }
+
+    // Additional check: prevent same user from placing any bid if they're the current leader
+    // This includes both manual and proxy bids
+    const currentAuction = await queries.getAuctionById(auctionId);
+    if (currentAuction && currentAuction.current_highest_bidder_id === bidderId) {
+      return res.status(400).json({ 
+        error: `You are currently the highest bidder. You cannot place another bid on this auction.`,
+        currentBid: currentAuction.current_bid || currentAuction.current_bid_price || 0,
         isCurrentLeader: true
       });
     }

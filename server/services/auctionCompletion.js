@@ -119,6 +119,15 @@ export async function completeAuction(auctionId, source = 'system', io = null) {
           finalPrice: 0,
           message: 'Auction ended with no bids'
         });
+
+        // Also broadcast globally so admin dashboard picks it up
+        io.emit('auction:ended', {
+          auctionId,
+          status: 'ended',
+          winner: null,
+          finalPrice: 0,
+          message: 'Auction ended with no bids'
+        });
         
         io.to(`user:${auction.seller_id}`).emit('notification:new', {
           type: 'auction_ended',
@@ -210,6 +219,19 @@ export async function completeAuction(auctionId, source = 'system', io = null) {
       try {
         // Emit to auction room
         io.to(`auction:${auctionId}`).emit('auction:ended', {
+          auctionId,
+          status: 'ended',
+          winner: {
+            id: winnerId,
+            username: winner.username,
+            email: winner.email
+          },
+          finalPrice: winningAmount,
+          message: `Auction ended. Winner: ${winner.username}`
+        });
+
+        // Also broadcast globally so admin dashboard can pick it up
+        io.emit('auction:ended', {
           auctionId,
           status: 'ended',
           winner: {

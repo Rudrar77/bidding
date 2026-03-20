@@ -1,5 +1,0 @@
-<<<<<<< HEAD
-Implementing a modern UI for the real-time online auction platform involves enhancing the design with glassmorphism, subtle gradients, soft shadows, and clean typography. Interactive elements such as smooth animations for bid updates, dynamic auction cards, and modern analytics visualizations should be incorporated. Ensure full responsiveness and support for dark/light modes.
-=======
-
->>>>>>> 465eaddd1e518be275340fee20867c3dd21e6a48

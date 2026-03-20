@@ -96,6 +96,26 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // Store active connections
 const activeConnections = new Map();
 
+// Per-auction mutex to prevent race conditions on concurrent bids
+const auctionLocks = new Map();
+
+async function withAuctionLock(auctionId, fn) {
+  const key = String(auctionId);
+  const prev = auctionLocks.get(key) || Promise.resolve();
+  let resolve;
+  const current = new Promise((r) => { resolve = r; });
+  auctionLocks.set(key, current);
+  try {
+    await prev; // wait for previous operation on this auction
+    return await fn();
+  } finally {
+    resolve();
+    if (auctionLocks.get(key) === current) {
+      auctionLocks.delete(key);
+    }
+  }
+}
+
 // Socket.IO Middleware for authentication (optional during dev, required for bids)
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
@@ -270,7 +290,6 @@ io.on('connection', (socket) => {
       console.log(`[BID PLACE EVENT] Socket: ${socket.id}, Auth User: ${socket.userId}, Bidder ID: ${bidderId}, Amount: ${bidAmount}, Proxy: ${isProxy}, Max: ${maxProxyAmount}`);
 
       // Verify bidder ID matches authenticated user (prevent bid spoofing)
-      // Convert both to string for comparison
       const socketUserId = String(socket.userId);
       const incomingBidderId = String(bidderId);
       
@@ -286,212 +305,236 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Get auction details
-      const auction = await queries.getAuctionById(auctionId);
-      if (!auction) {
-        socket.emit('bid:error', { message: 'Auction not found' });
-        console.warn(`[BID FAILED] Auction ${auctionId} not found`);
-        return;
-      }
+      // ===== RACE CONDITION PROTECTION =====
+      // Use per-auction mutex to serialize concurrent bids on the same auction
+      await withAuctionLock(auctionId, async () => {
+        // Get auction details
+        const auction = await queries.getAuctionById(auctionId);
+        if (!auction) {
+          socket.emit('bid:error', { message: 'Auction not found' });
+          console.warn(`[BID FAILED] Auction ${auctionId} not found`);
+          return;
+        }
 
-      // Check auction status
-      if (auction.status !== 'active') {
-        socket.emit('bid:error', { message: `Cannot bid on ${auction.status} auction` });
-        console.warn(`[BID FAILED] Auction ${auctionId} is ${auction.status}, not active`);
-        return;
-      }
+        // Check auction status
+        if (auction.status !== 'active') {
+          socket.emit('bid:error', { message: `Cannot bid on ${auction.status} auction` });
+          console.warn(`[BID FAILED] Auction ${auctionId} is ${auction.status}, not active`);
+          return;
+        }
 
-      // Get current highest bid
-      const highestBid = await queries.getHighestBid(auctionId);
+        // Check if auction time has expired
+        const now = new Date();
+        const endTime = new Date(auction.auction_end_time);
+        if (endTime.getTime() <= now.getTime()) {
+          socket.emit('bid:error', { message: 'This auction has ended. No more bids can be placed.' });
+          console.warn(`[BID FAILED] Auction ${auctionId} has expired`);
+          return;
+        }
 
-      // --- ANTI-SNIPING LOGIC ---
-      const now = new Date();
-      const endTime = new Date(auction.auction_end_time);
-      const remainingTime = endTime.getTime() - now.getTime();
-      const tenSeconds = 10 * 1000;
-      let newEndTime = null;
+        // Get current highest bid
+        const highestBid = await queries.getHighestBid(auctionId);
 
-      if (remainingTime > 0 && remainingTime <= tenSeconds) {
-        // Extend the auction by 30 seconds from now
-        newEndTime = new Date(now.getTime() + 30 * 1000);
-        await queries.updateAuctionEndTime(auctionId, newEndTime);
-        console.log(`[ANTI-SNIPE] Auction ${auctionId} extended to ${newEndTime.toISOString()}`);
-      }
+        // ===== PREVENT SAME-USER CONSECUTIVE BIDS =====
+        if (highestBid && String(highestBid.bidder_id) === incomingBidderId) {
+          socket.emit('bid:error', {
+            message: 'You are already the highest bidder. Wait for someone else to bid first.',
+            isCurrentLeader: true,
+            currentBid: highestBid.bid_amount
+          });
+          console.warn(`[BID BLOCKED] User ${bidderId} is already the highest bidder on auction ${auctionId}`);
+          return;
+        }
 
-      // Validate bid amount against current bid
-      if (highestBid && bidAmount < highestBid.bid_amount) {
-        socket.emit('bid:error', { message: `Bid amount must be higher than current bid (${highestBid.bid_amount} CR)` });
-        console.warn(`[BID FAILED] Bid amount ${bidAmount} not greater than current highest ${highestBid.bid_amount}`);
-        return;
-      }
+        // Validate bid amount against current bid
+        if (highestBid && bidAmount < highestBid.bid_amount) {
+          socket.emit('bid:error', { message: `Bid amount must be higher than current bid (${highestBid.bid_amount} CR)` });
+          console.warn(`[BID FAILED] Bid amount ${bidAmount} not greater than current highest ${highestBid.bid_amount}`);
+          return;
+        }
 
-      // Validate bid amount against starting price
-      if (bidAmount < auction.starting_price) {
-        socket.emit('bid:error', { message: `Bid amount must be at least ${auction.starting_price} CR` });
-        console.warn(`[BID FAILED] Bid amount ${bidAmount} less than starting price ${auction.starting_price}`);
-        return;
-      }
+        // Validate bid amount against starting price
+        if (bidAmount < auction.starting_price) {
+          socket.emit('bid:error', { message: `Bid amount must be at least ${auction.starting_price} CR` });
+          console.warn(`[BID FAILED] Bid amount ${bidAmount} less than starting price ${auction.starting_price}`);
+          return;
+        }
 
-      // Get user credits
-      const user = await queries.getUserCredits(bidderId);
-      if (!user) {
-        socket.emit('bid:error', { message: 'User not found' });
-        console.warn(`[BID FAILED] User ${bidderId} not found in database`);
-        return;
-      }
+        // Get user credits
+        const user = await queries.getUserCredits(bidderId);
+        if (!user) {
+          socket.emit('bid:error', { message: 'User not found' });
+          console.warn(`[BID FAILED] User ${bidderId} not found in database`);
+          return;
+        }
 
-      console.log(`[USER LOOKUP] User ${bidderId}: type='${user.user_type}', credits=${user.credits}, username='${user.username}'`);
+        console.log(`[USER LOOKUP] User ${bidderId}: type='${user.user_type}', credits=${user.credits}, username='${user.username}'`);
 
-      // Verify user is a buyer/bidder (not a seller or admin)
-      if (user.user_type !== 'buyer') {
-        socket.emit('bid:error', { 
-          message: `Only bidders can place bids. Your account type is '${user.user_type}' which does not allow bidding.`,
-          userType: user.user_type
-        });
-        console.warn(`[AUTH FAILED] User ${bidderId} with type '${user.user_type}' attempted to place bid`);
-        return;
-      }
+        // Verify user is a buyer/bidder (not a seller or admin)
+        if (user.user_type !== 'buyer') {
+          socket.emit('bid:error', { 
+            message: `Only bidders can place bids. Your account type is '${user.user_type}' which does not allow bidding.`,
+            userType: user.user_type
+          });
+          console.warn(`[AUTH FAILED] User ${bidderId} with type '${user.user_type}' attempted to place bid`);
+          return;
+        }
 
-      // Get client IP and user agent from socket handshake or headers
-      const clientIP = socket.handshake.headers['x-client-ip'] || 
-                      socket.handshake.address || 
-                      socket.handshake.headers['x-forwarded-for'] ||
-                      socket.handshake.headers['x-real-ip'] ||
-                      socket.handshake.headers['cf-connecting-ip'] ||
-                      socket.handshake.headers['x-real-ip'] ||
-                      'Unknown';
-      
-      const userAgent = socket.handshake.headers['user-agent'] || 
-                       socket.handshake.headers['x-user-agent'] ||
-                       'Unknown';
+        // Check if user has sufficient credits
+        if (user.credits < bidAmount) {
+          socket.emit('bid:error', { 
+            message: `Insufficient credits. You have ${user.credits} CR but need ${bidAmount} CR`,
+            currentCredits: user.credits,
+            requiredCredits: bidAmount
+          });
+          console.warn(`[BID FAILED] User ${bidderId} has insufficient credits: ${user.credits} < ${bidAmount}`);
+          return;
+        }
 
-      // Check if user has sufficient credits
-      if (user.credits < bidAmount) {
-        socket.emit('bid:error', { 
-          message: `Insufficient credits. You have ${user.credits} CR but need ${bidAmount} CR`,
-          currentCredits: user.credits,
-          requiredCredits: bidAmount
-        });
-        console.warn(`[BID FAILED] User ${bidderId} has insufficient credits: ${user.credits} < ${bidAmount}`);
-        return;
-      }
-
-      // CREDIT DEDUCTION: Deduct credits for placing bid
-      // Note: Credits are deducted when bid is placed (winning bid)
-      const creditResult = await queries.deductCredits(
-        bidderId,
-        bidAmount,
-        'bid_placement',
-        auctionId,
-        null,
-        `Bid placed on auction ${auctionId}`
-      );
-
-      // Create bid record
-      const bidId = await queries.createBid({ 
-        auctionId, 
-        bidderId, 
-        bidAmount
-      });
-      await queries.updateAuctionCurrentBid(auctionId, bidAmount, bidderId);
-
-      // Update bid with credits deducted
-      await queries.updateBidCreditsDeducted(bidId, bidAmount);
-
-      // Notify all auction room subscribers with real-time update
-      io.to(`auction:${auctionId}`).emit('new-bid', {
-        id: bidId,
-        auctionId,
-        bidderId,
-        amount: bidAmount,
-        bidderName: user.username || 'Anonymous',
-        timestamp: new Date(),
-        isProxy,
-        maxProxyAmount
-      });
-
-      // Emit to bidder with updated credit balance
-      io.to(`user:${bidderId}`).emit('credits:updated', {
-        currentCredits: creditResult.balanceAfter,
-        bidAmount,
-        auctionId,
-        message: `Bid placed! Credits deducted: ${bidAmount} CR`
-      });
-
-      // Also emit to all for analytics
-      io.emit('bid:placed', {
-        bidId,
-        auctionId,
-        bidderId,
-        bidAmount,
-        timestamp: new Date(),
-      });
-
-      // Notify clients if auction was extended
-      if (newEndTime) {
-        io.to(`auction:${auctionId}`).emit('auction:extended', {
+        // CREDIT DEDUCTION: Deduct credits for placing bid
+        const creditResult = await queries.deductCredits(
+          bidderId,
+          bidAmount,
+          'bid_placement',
           auctionId,
-          newEndTime: newEndTime.toISOString()
-        });
-      }
-
-      // RETURN CREDITS: If there was a previous highest bid, return credits to that user
-      if (highestBid && highestBid.bidder_id !== bidderId) {
-        // Return the outbid user's credits
-        const outbidResult = await queries.addCredits(
-          highestBid.bidder_id,
-          highestBid.bid_amount,
-          'bid_return',
-          auctionId,
-          highestBid.id,
-          `Outbid by ${user.username}, credits returned`
+          null,
+          `Bid placed on auction ${auctionId}`
         );
 
-        // Mark previous bid as outbid
-        await queries.markBidAsOutbid(highestBid.id);
-
-        // Notify outbid user
-        await queries.createNotification({
-          userId: highestBid.bidder_id,
-          type: 'bid_outbid',
-          title: 'Outbid!',
-          message: `You have been outbid on "${auction.title}" by ${user.username} with ${bidAmount} CR. Your ${highestBid.bid_amount} CR has been returned.`,
-          relatedAuctionId: auctionId,
-          relatedUserId: bidderId,
+        // Create bid record
+        const bidId = await queries.createBid({ 
+          auctionId, 
+          bidderId, 
+          bidAmount
         });
+        await queries.updateAuctionCurrentBid(auctionId, bidAmount, bidderId);
 
-        // Notify outbid user in real-time
-        io.to(`user:${highestBid.bidder_id}`).emit('notification:new', {
-          type: 'bid_outbid',
+        // Update bid with credits deducted
+        await queries.updateBidCreditsDeducted(bidId, bidAmount);
+
+        // Notify all auction room subscribers with real-time update
+        io.to(`auction:${auctionId}`).emit('new-bid', {
+          id: bidId,
           auctionId,
-          creditsReturned: highestBid.bid_amount,
-          newBalance: outbidResult.balanceAfter
+          bidderId,
+          amount: bidAmount,
+          bidderName: user.username || 'Anonymous',
+          timestamp: new Date(),
+          isProxy,
+          maxProxyAmount
         });
 
-        console.log(`[OUTBID] User ${highestBid.bidder_id} outbid by ${bidderId}. Returned ${highestBid.bid_amount} CR.`);
-      }
+        // Emit to bidder with updated credit balance
+        io.to(`user:${bidderId}`).emit('credits:updated', {
+          currentCredits: creditResult.balanceAfter,
+          bidAmount,
+          auctionId,
+          message: `Bid placed! Credits deducted: ${bidAmount} CR`
+        });
 
-      console.log(`✓ [BID SUCCESS] Bid ${bidId} placed on auction ${auctionId} by user ${bidderId} (${user.username}) for ${bidAmount} CR. Remaining: ${creditResult.balanceAfter}`);
+        // Also emit to all for analytics
+        io.emit('bid:placed', {
+          bidId,
+          auctionId,
+          bidderId,
+          bidAmount,
+          timestamp: new Date(),
+        });
 
-      // If this was a proxy bid setup, save it to the database
-      if (isProxy && maxProxyAmount) {
-         // Check if proxy bid already exists
-         const existingProxy = await queries.getActiveProxyBid(auctionId, bidderId);
-         if (existingProxy) {
-           console.log(`[PROXY UPDATE] Updating existing proxy bid ${existingProxy.id} from ${existingProxy.max_bid_amount} to ${maxProxyAmount}`);
-           await queries.updateProxyBid(existingProxy.id, maxProxyAmount);
-         } else {
-           console.log(`[PROXY CREATE] Creating new proxy bid with max ${maxProxyAmount}`);
-           await queries.createProxyBid(auctionId, bidderId, maxProxyAmount);
-         }
-         console.log(`[PROXY SET] User ${bidderId} set proxy max ${maxProxyAmount} for auction ${auctionId}`);
-      }
+        // ===== ANTI-SNIPING LOGIC (after successful bid) =====
+        const remainingTime = endTime.getTime() - Date.now();
+        const tenSeconds = 10 * 1000;
+        let newEndTime = null;
 
-      // --- AUTO-EVALUATE PROXY BIDS NATIVELY ---
-      // Hand over to the centralized proxy bidding service to do the looping
-      // This will trigger proxy wars and place additional bids if needed
-      await proxyBiddingService.processProxyBidding(auctionId, io);
+        if (remainingTime > 0 && remainingTime <= tenSeconds) {
+          // Extend the auction by 30 seconds from now
+          newEndTime = new Date(Date.now() + 30 * 1000);
+          await queries.updateAuctionEndTime(auctionId, newEndTime);
+          console.log(`[ANTI-SNIPE] Auction ${auctionId} extended to ${newEndTime.toISOString()}`);
+        }
 
+        // Notify clients if auction was extended
+        if (newEndTime) {
+          io.to(`auction:${auctionId}`).emit('auction:extended', {
+            auctionId,
+            newEndTime: newEndTime.toISOString(),
+            timeAdded: 30,
+            message: 'Auction extended by 30 seconds due to last-second bid!'
+          });
+        }
+
+        // RETURN CREDITS: If there was a previous highest bid, return credits to that user
+        if (highestBid && highestBid.bidder_id !== bidderId) {
+          // Return the outbid user's credits
+          const outbidResult = await queries.addCredits(
+            highestBid.bidder_id,
+            highestBid.bid_amount,
+            'bid_return',
+            auctionId,
+            highestBid.id,
+            `Outbid by ${user.username}, credits returned`
+          );
+
+          // Mark previous bid as outbid
+          await queries.markBidAsOutbid(highestBid.id);
+
+          // Notify outbid user
+          await queries.createNotification({
+            userId: highestBid.bidder_id,
+            type: 'bid_outbid',
+            title: 'Outbid!',
+            message: `You have been outbid on "${auction.title}" by ${user.username} with ${bidAmount} CR. Your ${highestBid.bid_amount} CR has been returned.`,
+            relatedAuctionId: auctionId,
+            relatedUserId: bidderId,
+          });
+
+          // Notify outbid user in real-time
+          io.to(`user:${highestBid.bidder_id}`).emit('notification:new', {
+            type: 'bid_outbid',
+            auctionId,
+            creditsReturned: highestBid.bid_amount,
+            newBalance: outbidResult.balanceAfter
+          });
+
+          console.log(`[OUTBID] User ${highestBid.bidder_id} outbid by ${bidderId}. Returned ${highestBid.bid_amount} CR.`);
+        }
+
+        console.log(`✓ [BID SUCCESS] Bid ${bidId} placed on auction ${auctionId} by user ${bidderId} (${user.username}) for ${bidAmount} CR. Remaining: ${creditResult.balanceAfter}`);
+
+        // If this was a proxy bid setup, save it to the database
+        if (isProxy && maxProxyAmount) {
+           // ===== PROXY BID LAST-10-MIN RESTRICTION =====
+           const proxyCheckNow = Date.now();
+           const proxyEndTime = new Date(auction.auction_end_time).getTime();
+           const timeUntilEnd = proxyEndTime - proxyCheckNow;
+           const tenMinutesMs = 10 * 60 * 1000;
+
+           if (timeUntilEnd <= tenMinutesMs) {
+             console.warn(`[PROXY BLOCKED] User ${bidderId} tried to set proxy bid on auction ${auctionId} with only ${Math.round(timeUntilEnd / 1000)}s remaining (< 10 min)`);
+             // The manual bid already went through, but we don't save the proxy
+             socket.emit('bid:error', {
+               message: 'Proxy bidding is not allowed in the last 10 minutes of an auction. Your manual bid was placed, but auto-bidding was not activated.',
+               proxyBlocked: true
+             });
+           } else {
+             // Check if proxy bid already exists
+             const existingProxy = await queries.getActiveProxyBid(auctionId, bidderId);
+             if (existingProxy) {
+               console.log(`[PROXY UPDATE] Updating existing proxy bid ${existingProxy.id} from ${existingProxy.max_bid_amount} to ${maxProxyAmount}`);
+               await queries.updateProxyBid(existingProxy.id, maxProxyAmount);
+             } else {
+               console.log(`[PROXY CREATE] Creating new proxy bid with max ${maxProxyAmount}`);
+               await queries.createProxyBid(auctionId, bidderId, maxProxyAmount);
+             }
+             console.log(`[PROXY SET] User ${bidderId} set proxy max ${maxProxyAmount} for auction ${auctionId}`);
+           }
+        }
+
+        // --- AUTO-EVALUATE PROXY BIDS NATIVELY ---
+        // Hand over to the centralized proxy bidding service to do the looping
+        // This will trigger proxy wars and place additional bids if needed
+        await proxyBiddingService.processProxyBidding(auctionId, io);
+      }); // end withAuctionLock
 
     } catch (error) {
       console.error('Error placing bid:', error.message);
@@ -658,41 +701,35 @@ app.get('/api/health', (req, res) => {
 // Auto-Sweep: Periodically check for expired auctions and close them
 setInterval(async () => {
   try {
-    const limit = 100;
-    const offset = 0;
+    // Get auctions that are still 'active' but whose end time has passed
+    const expiredAuctions = await queries.getExpiredActiveAuctions(100);
     
-    // Get a batch of active auctions to check
-    const activeAuctions = await queries.getActiveAuctions(limit, offset);
-    
-    if (!activeAuctions || activeAuctions.length === 0) {
+    if (!expiredAuctions || expiredAuctions.length === 0) {
       return;
     }
 
-    console.log(`[SWEEPER] Checking ${activeAuctions.length} active auctions for expiration...`);
+    console.log(`[SWEEPER] Found ${expiredAuctions.length} expired auction(s) to auto-close...`);
     
     let processedCount = 0;
     let completedCount = 0;
     let errorCount = 0;
 
-    for (const auction of activeAuctions) {
+    for (const auction of expiredAuctions) {
       try {
-        // Check if auction should be completed
-        if (shouldCompleteAuction(auction)) {
-          console.log(`[SWEEPER] Auction ${auction.id} ("${auction.title}") has expired. Closing automatically...`);
-          
-          // Use the centralized auction completion service
-          const result = await completeAuction(auction.id, 'sweeper', io);
-          
-          if (result.success) {
-            completedCount++;
-            console.log(`[SWEEPER] ✓ Auction ${auction.id} completed successfully`);
-          } else {
-            errorCount++;
-            console.error(`[SWEEPER] ✗ Failed to complete auction ${auction.id}:`, result.error);
-          }
-          
-          processedCount++;
+        console.log(`[SWEEPER] Auction ${auction.id} ("${auction.title}") has expired. Closing automatically...`);
+        
+        // Use the centralized auction completion service
+        const result = await completeAuction(auction.id, 'sweeper', io);
+        
+        if (result.success) {
+          completedCount++;
+          console.log(`[SWEEPER] ✓ Auction ${auction.id} completed successfully`);
+        } else {
+          errorCount++;
+          console.error(`[SWEEPER] ✗ Failed to complete auction ${auction.id}:`, result.error);
         }
+        
+        processedCount++;
       } catch (error) {
         errorCount++;
         console.error(`[SWEEPER] ✗ Error processing auction ${auction.id}:`, error.message);
@@ -706,7 +743,7 @@ setInterval(async () => {
   } catch (error) {
     console.error(`[SWEEPER] ✗ Error in sweeper process:`, error.message);
   }
-}, 10000); // Check every 10 seconds
+}, 5000); // Check every 5 seconds for more responsive auto-close
 
 // Register route handlers
 app.use('/api/auth', authRoutes);

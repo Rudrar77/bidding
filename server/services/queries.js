@@ -79,6 +79,22 @@ export const getActiveAuctions = async (limit = 20, offset = 0) => {
   return rows;
 };
 
+// Get active auctions whose end time has passed (for the sweeper to auto-close)
+export const getExpiredActiveAuctions = async (limit = 100) => {
+  const [rows] = await pool.query(
+    `SELECT a.*, u.username as seller_name, c.name as category_name,
+            (SELECT COUNT(*) FROM bids WHERE auction_id = a.id) as total_bids
+     FROM auctions a
+     LEFT JOIN users u ON a.seller_id = u.id
+     LEFT JOIN categories c ON a.category_id = c.id
+     WHERE a.status = 'active' AND a.auction_end_time <= NOW()
+     ORDER BY a.auction_end_time ASC
+     LIMIT ?`,
+    [limit]
+  );
+  return rows;
+};
+
 export const getAuctionsByCategory = async (categoryId, limit = 20, offset = 0) => {
   const [rows] = await pool.query(
     `SELECT a.*, u.username as seller_name, c.name as category_name

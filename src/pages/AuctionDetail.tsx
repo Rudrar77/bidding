@@ -81,6 +81,25 @@ export default function AuctionDetail() {
 
   const isLiveAuction = useMemo(() => auction?.status === "active", [auction?.status]);
 
+  // Track whether proxy bidding is allowed (> 10 minutes remaining)
+  const [proxyAllowed, setProxyAllowed] = useState(true);
+
+  useEffect(() => {
+    if (!auction || auction.status !== 'active') {
+      setProxyAllowed(false);
+      return;
+    }
+    const checkProxyTime = () => {
+      const endMs = new Date(auction.endTime || auction.end_time || auction.auction_end_time || '').getTime();
+      const remaining = endMs - Date.now();
+      const tenMinMs = 10 * 60 * 1000;
+      setProxyAllowed(remaining > tenMinMs);
+    };
+    checkProxyTime();
+    const interval = setInterval(checkProxyTime, 1000);
+    return () => clearInterval(interval);
+  }, [auction?.endTime, auction?.end_time, auction?.auction_end_time, auction?.status]);
+
   const currentDisplayBid =
     (auction?.currentBid || auction?.current_bid_price || 0) > 0
       ? (auction?.currentBid || auction?.current_bid_price || 0)
@@ -193,7 +212,33 @@ export default function AuctionDetail() {
     setAnalyzing(true);
     try {
       const currentPrice = auction.currentBid || auction.current_bid_price || 0;
-      const data = {
+      
+      // Determine what the user's intended bid is for analysis
+      const intendedBid = bidAmount 
+        ? Number.parseInt(bidAmount, 10) 
+        : (showProxyInput && maxProxy ? Number.parseInt(maxProxy, 10) : currentPrice);
+
+      // Use the new pure LLM-based winning probability analysis
+      const llmData = {
+        auctionTitle: auction.title,
+        currentBid: currentPrice,
+        userBid: intendedBid,
+        startingPrice: auction.minimumBid || auction.starting_price || 0,
+        totalBids: auction.totalBids || auction.total_bids || 0,
+        activeBidders: bids.length,
+        remainingTime: new Date(auction.endTime || auction.end_time || auction.auction_end_time || "").getTime() - Date.now(),
+        userCredits: user.credits || 0,
+        recentBids: bids.slice(0, 5).map(b => ({ 
+          amount: b.amount, 
+          timestamp: b.timestamp,
+          bidderName: b.bidderName
+        }))
+      };
+      
+      const llmAnalysis = await API_SERVICE.ai.getWinningProbabilityLLM(llmData, token);
+      
+      // Also get ML-based price prediction for comprehensive analysis
+      const mlData = {
         auctionId: auction.id,
         auctionTitle: auction.title,
         currentBid: currentPrice,
@@ -202,6 +247,7 @@ export default function AuctionDetail() {
         activeBidders: bids.length,
         remainingTime: new Date(auction.endTime || auction.end_time || auction.auction_end_time || "").getTime() - Date.now(),
         userCredits: user.credits || 0,
+        userIntendedBid: intendedBid,
         recentBids: bids.slice(0, 5).map(b => ({ amount: b.amount, timestamp: b.timestamp })),
         // Enhanced data for comprehensive analysis
         auctionDetails: {
@@ -239,11 +285,22 @@ export default function AuctionDetail() {
         }
       };
       
-      const analysis = await API_SERVICE.ai.getBiddingAnalysis(data, token);
-      setAuctionAnalysis(analysis);
+      const mlAnalysis = await API_SERVICE.ai.getBiddingAnalysis(mlData, token);
+      
+      // Combine both analyses
+      const combinedAnalysis = {
+        ...mlAnalysis,
+        llmWinningProbability: llmAnalysis.winningProbability,
+        llmExplanation: llmAnalysis.explanation,
+        llmActionableTip: llmAnalysis.actionableTip,
+        llmAnalysis: llmAnalysis.analysis,
+        source: "Combined ML Price Prediction + LLM Winning Probability"
+      };
+      
+      setAuctionAnalysis(combinedAnalysis);
       toast({ 
         title: "Auction Analysis Complete", 
-        description: "Comprehensive bidding insights generated.", 
+        description: "Comprehensive bidding insights generated using ML price prediction and LLM winning probability analysis.", 
         variant: "default" 
       });
     } catch (error) {
@@ -358,6 +415,36 @@ export default function AuctionDetail() {
       }
     });
 
+    // Listen for auction time extension (anti-sniping)
+    socket.on('auction:extended', (data: any) => {
+      if (String(data.auctionId) === String(auction.id)) {
+        setAuction(prev => prev ? {
+          ...prev,
+          endTime: data.newEndTime,
+          end_time: data.newEndTime,
+          auction_end_time: data.newEndTime,
+        } : null);
+        toast({
+          title: "⏰ Auction Extended!",
+          description: data.message || "30 seconds added due to last-second bid!",
+        });
+      }
+    });
+
+    // Listen for auction ended (auto-close / admin close)
+    socket.on('auction:ended', (data: any) => {
+      if (String(data.auctionId) === String(auction.id)) {
+        setAuction(prev => prev ? { ...prev, status: 'ended' } : null);
+        const winnerMsg = data.winner
+          ? `Winner: ${data.winner.username} with ${data.finalPrice} CR`
+          : 'No bids were placed.';
+        toast({
+          title: "🔨 Auction Ended!",
+          description: data.message || winnerMsg,
+        });
+      }
+    });
+
     const onChatNew = (msg: ChatMessage) => {
       if (!msg || String(msg.auctionId) !== String(auction.id)) return;
       setChatMessages((prev) => [msg, ...prev].slice(0, 100));
@@ -370,6 +457,8 @@ export default function AuctionDetail() {
       socket.off('bid:placed');
       socket.off('bid:error');
       socket.off('credits:updated');
+      socket.off('auction:extended');
+      socket.off('auction:ended');
       socket.off('chat:new', onChatNew);
       socket.emit('leave-auction', auction.id);
     };
@@ -809,23 +898,136 @@ export default function AuctionDetail() {
                         </Button>
                         
                         {auctionAnalysis && (
-                          <div className="bg-secondary rounded-lg p-3 space-y-2">
-                            <div className="flex items-center justify-between">
-                              <span className="text-xs text-muted-foreground">Suggested Bid</span>
-                              <span className="font-mono font-bold text-primary">{auctionAnalysis.suggestedBid} CR</span>
+                          <div className="space-y-4">
+                            {/* ML Price Prediction */}
+                            <div className="bg-gradient-to-br from-blue-500/10 to-blue-600/5 border border-blue-500/20 rounded-lg p-4 space-y-4">
+                              <h4 className="text-sm font-bold text-foreground">ML Price Prediction</h4>
+                              
+                              {/* Note about fresh data */}
+                              <div className="bg-blue-500/10 border border-blue-500/20 rounded p-2">
+                                <p className="text-xs text-muted-foreground">
+                                  📊 ML model predicts final price based on current auction dynamics.
+                                </p>
+                              </div>
+                              
+                              {/* Predicted Final Price Range */}
+                              <div className="space-y-2">
+                                <p className="text-xs text-muted-foreground font-semibold">Based on current bidding activity, this item will likely sell for:</p>
+                                <div className="bg-gradient-to-r from-blue-500/20 to-blue-600/10 border border-blue-500/30 rounded-lg p-3">
+                                  {(() => {
+                                    const predictedPrice = auctionAnalysis.mlPredictedPrice;
+                                    const lowerBound = Math.max(0.75 * predictedPrice, currentDisplayBid);
+                                    const upperBound = 1.25 * predictedPrice;
+                                    return (
+                                      <>
+                                        <p className="text-2xl font-bold text-foreground">
+                                          {Math.round(lowerBound)} - {Math.round(upperBound)} CR
+                                        </p>
+                                        <p className="text-xs text-muted-foreground mt-3">
+                                          {predictedPrice > currentDisplayBid 
+                                            ? `You need ${Math.ceil(predictedPrice - currentDisplayBid)} CR more to reach the predicted price`
+                                            : `Already at/above the predicted price`}
+                                        </p>
+                                      </>
+                                    );
+                                  })()}
+                                </div>
+                              </div>
                             </div>
-                            <div className="flex items-center justify-between">
-                              <span className="text-xs text-muted-foreground">Winning Probability</span>
-                              <span className="text-sm font-semibold">{auctionAnalysis.winningProbability}%</span>
+
+                            {/* LLM Winning Probability Analysis */}
+                            {auctionAnalysis.llmWinningProbability && (
+                              <div className="bg-gradient-to-br from-purple-500/10 to-pink-500/5 border border-purple-500/20 rounded-lg p-4 space-y-4">
+                                <h4 className="text-sm font-bold text-foreground">LLM Winning Probability Analysis</h4>
+                                
+                                <div className="bg-purple-500/10 border border-purple-500/20 rounded p-2">
+                                  <p className="text-xs text-muted-foreground">
+                                    🤖 Pure LLM analysis using auction theory - no ML model dependency.
+                                  </p>
+                                </div>
+                                
+                                {/* Winning Probability */}
+                                <div className="space-y-2">
+                                  <p className="text-xs text-muted-foreground font-semibold">Your calculated winning probability:</p>
+                                  <div className={`rounded-lg p-3 border ${
+                                    auctionAnalysis.llmWinningProbability >= 70 
+                                      ? 'bg-green-500/10 border-green-500/30' 
+                                      : auctionAnalysis.llmWinningProbability >= 40 
+                                      ? 'bg-yellow-500/10 border-yellow-500/30' 
+                                      : 'bg-red-500/10 border-red-500/30'
+                                  }`}>
+                                    <div className="flex items-end gap-2">
+                                      <p className={`text-3xl font-bold ${
+                                        auctionAnalysis.llmWinningProbability >= 70 
+                                          ? 'text-green-500' 
+                                          : auctionAnalysis.llmWinningProbability >= 40 
+                                          ? 'text-yellow-600' 
+                                          : 'text-red-500'
+                                      }`}>{auctionAnalysis.llmWinningProbability}%</p>
+                                      <p className="text-xs text-muted-foreground mb-1">
+                                        {auctionAnalysis.llmWinningProbability >= 70 
+                                          ? '✓ High chance' 
+                                          : auctionAnalysis.llmWinningProbability >= 40 
+                                          ? '⚠ Moderate chance' 
+                                          : '✗ Low chance'}
+                                      </p>
+                                    </div>
+                                  </div>
+                                </div>
+
+                                {/* LLM Explanation */}
+                                {auctionAnalysis.llmExplanation && (
+                                  <div className="space-y-2">
+                                    <p className="text-xs text-muted-foreground font-semibold">Analysis:</p>
+                                    <div className="bg-background/70 border border-border rounded-lg p-3">
+                                      <p className="text-sm text-foreground">{auctionAnalysis.llmExplanation}</p>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* LLM Actionable Tip */}
+                                {auctionAnalysis.llmActionableTip && (
+                                  <div className="space-y-2">
+                                    <p className="text-xs text-muted-foreground font-semibold">Recommendation:</p>
+                                    <div className="bg-gradient-to-r from-green-500/10 to-emerald-500/10 border border-green-500/30 rounded-lg p-3">
+                                      <p className="text-sm text-green-600 font-medium">{auctionAnalysis.llmActionableTip}</p>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* LLM Analysis Details */}
+                                {auctionAnalysis.llmAnalysis && (
+                                  <div className="grid grid-cols-3 gap-2 text-xs">
+                                    <div className="bg-background/50 border border-border rounded p-2">
+                                      <p className="text-muted-foreground">Bid Strength</p>
+                                      <p className="font-semibold">{auctionAnalysis.llmAnalysis.bidStrength}</p>
+                                    </div>
+                                    <div className="bg-background/50 border border-border rounded p-2">
+                                      <p className="text-muted-foreground">Competition</p>
+                                      <p className="font-semibold">{auctionAnalysis.llmAnalysis.competitionLevel}</p>
+                                    </div>
+                                    <div className="bg-background/50 border border-border rounded p-2">
+                                      <p className="text-muted-foreground">Time Factor</p>
+                                      <p className="font-semibold">{auctionAnalysis.llmAnalysis.timeFactor}</p>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Combined Analysis Summary */}
+                            <div className="bg-gradient-to-r from-indigo-500/10 to-purple-500/10 border border-indigo-500/20 rounded-lg p-3">
+                              <p className="text-xs text-muted-foreground">
+                                📈 Source: {auctionAnalysis.source || "Combined ML + LLM Analysis"}
+                              </p>
                             </div>
-                            <div className="text-xs text-muted-foreground">
-                              {auctionAnalysis.explanation || auctionAnalysis.winningProbabilityReason || auctionAnalysis.strategy}
-                            </div>
+
+                            {/* Action Button */}
                             <Button
                               onClick={() => handleBid(auctionAnalysis.suggestedBid)}
-                              className="w-full mt-2 bg-green-500 hover:bg-green-600 text-white text-sm"
+                              className="w-full bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white text-sm font-semibold"
                             >
-                              Place Suggested Bid
+                              Place Bid: {auctionAnalysis.suggestedBid} CR
                             </Button>
                           </div>
                         )}
@@ -833,16 +1035,24 @@ export default function AuctionDetail() {
                     </div>
                   )}
 
-                  {/* Auto-increment / Proxy Bidding */}
+                  {/* Auto-increment / Proxy Bidding — only if > 10 min left */}
                   <div className="space-y-3 pt-2">
-                    <Button 
-                      variant="outline" 
-                      className="w-full flex justify-between items-center" 
-                      onClick={() => setShowProxyInput(!showProxyInput)}
-                    >
-                      <span className="flex items-center"><Zap className="w-4 h-4 mr-2 text-primary" /> Setup Proxy Bidding</span>
-                      <span className="text-xs text-muted-foreground">{showProxyInput ? "Cancel" : "Enable"}</span>
-                    </Button>
+                    {proxyAllowed ? (
+                      <Button 
+                        variant="outline" 
+                        className="w-full flex justify-between items-center" 
+                        onClick={() => setShowProxyInput(!showProxyInput)}
+                      >
+                        <span className="flex items-center"><Zap className="w-4 h-4 mr-2 text-primary" /> Setup Proxy Bidding</span>
+                        <span className="text-xs text-muted-foreground">{showProxyInput ? "Cancel" : "Enable"}</span>
+                      </Button>
+                    ) : (
+                      <div className="w-full text-center py-3 px-4 rounded-lg bg-destructive/10 border border-destructive/20">
+                        <p className="text-xs text-destructive font-medium flex items-center justify-center gap-2">
+                          <Zap className="w-3 h-3" /> Proxy bidding is disabled in the last 10 minutes
+                        </p>
+                      </div>
+                    )}
                     
                     {showProxyInput && (
                       <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} className="bg-secondary/50 rounded-lg p-4 space-y-3 border border-border">

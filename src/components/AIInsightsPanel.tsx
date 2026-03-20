@@ -39,6 +39,11 @@ interface AIAnalysis {
   strategy: string;
   winningProbabilityReason?: string;
   explanation?: string;
+  // ML model fields
+  mlPredictedPrice?: number;
+  mlWinProbability?: number;
+  mlSource?: string;
+  mlTopFeatures?: Array<{ feature: string; importance: string }>;
   auctionIntelligence: {
     auctionMood: string;
     bidSpeed: string;
@@ -50,6 +55,12 @@ interface AIAnalysis {
 interface WinningProbability {
   winningProbability: number;
   explanation: string;
+  // ML model fields
+  mlWinProbability?: number;
+  mlTopFeatures?: Array<{ feature: string; importance: string }>;
+  mlSource?: string;
+  actionableTip?: string;
+  mlPredictedPrice?: number;
 }
 
 interface AuctionIntelligence {
@@ -328,27 +339,90 @@ export const AIInsightsPanel: React.FC<AIInsightsPanelProps> = ({
         {/* Analysis Tab */}
         {activeTab === 'analysis' && analysis && (
           <div className="p-4 space-y-4">
-            {/* Suggested Bid */}
-            <div className="bg-gradient-to-r from-green-500/10 to-blue-500/10 border border-green-500/20 rounded-lg p-4">
-              <div className="flex items-center justify-between mb-2">
-                <h4 className="font-semibold flex items-center gap-2">
-                  <Zap className="w-4 h-4 text-green-500" />
-                  AI Suggested Bid
-                </h4>
-                <Badge variant="outline" className="text-green-600 border-green-500/30">
-                  {analysis.suggestedBid} CR
+            {/* ML Model Badge */}
+            {analysis.mlSource && (
+              <div className="flex items-center justify-end">
+                <Badge variant="outline" className="text-xs bg-purple-500/10 border-purple-500/30 text-purple-600">
+                  🤖 {analysis.mlSource}
                 </Badge>
               </div>
-              <p className="text-sm text-muted-foreground">{analysis.strategy}</p>
-              {onBidAmount && (
-                <Button
-                  onClick={() => onBidAmount(analysis.suggestedBid)}
-                  className="w-full mt-3 bg-green-500 hover:bg-green-600 text-white"
-                >
-                  Place AI Suggested Bid
-                </Button>
-              )}
-            </div>
+            )}
+
+            {/* ML Predicted Price Card - Primary Metric */}
+            {analysis.mlPredictedPrice && (
+              <div className="bg-gradient-to-r from-purple-500/10 to-blue-500/10 border-2 border-purple-500/40 rounded-lg p-4 shadow-lg">
+                <div className="flex items-start justify-between mb-1">
+                  <h4 className="font-bold text-lg flex items-center gap-2">
+                    <DollarSign className="w-5 h-5 text-purple-600" />
+                    ML Predicted Final Price
+                  </h4>
+                </div>
+                {(() => {
+                  const predictedPrice = analysis.mlPredictedPrice;
+                  const lowerBound = Math.max(0.75 * predictedPrice, 0);
+                  const upperBound = 1.25 * predictedPrice;
+                  return (
+                    <>
+                      <div className="text-3xl font-bold text-purple-600 mb-2">
+                        {Math.round(lowerBound)} - {Math.round(upperBound)} CR
+                      </div>
+                      <p className="text-sm text-muted-foreground mb-3">
+                        XGBoost regression model prediction based on current auction dynamics
+                      </p>
+                    </>
+                  );
+                })()}
+                
+                {/* Top Influencing Features */}
+                {analysis.mlTopFeatures && analysis.mlTopFeatures.length > 0 && (
+                  <div className="mt-3 space-y-2">
+                    <p className="text-xs font-semibold text-muted-foreground">Top Influencing Factors:</p>
+                    <div className="grid grid-cols-1 gap-1">
+                      {analysis.mlTopFeatures.slice(0, 3).map((feature, idx) => (
+                        <div key={idx} className="flex items-center justify-between text-xs">
+                          <span className="capitalize font-medium">{feature.feature}</span>
+                          <div className="flex-1 mx-2 h-2 bg-muted rounded-full overflow-hidden">
+                            <div 
+                              className="h-full bg-purple-500"
+                              style={{ width: `${Math.min(parseFloat(feature.importance), 100)}%` }}
+                            />
+                          </div>
+                          <span className="text-muted-foreground font-semibold">{feature.importance}%</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ML Win Probability Card - Primary Metric */}
+            {analysis.mlWinProbability !== undefined && (
+              <div className={`bg-gradient-to-r from-blue-500/10 to-cyan-500/10 border-2 rounded-lg p-4 shadow-lg ${
+                analysis.mlWinProbability > 60 ? 'border-green-500/40' :
+                analysis.mlWinProbability > 30 ? 'border-yellow-500/40' :
+                'border-red-500/40'
+              }`}>
+                <div className="flex items-start justify-between mb-1">
+                  <h4 className="font-bold text-lg flex items-center gap-2">
+                    <TrendingUp className="w-5 h-5 text-blue-600" />
+                    ML Winning Probability
+                  </h4>
+                </div>
+                <div className={`text-3xl font-bold mb-2 ${
+                  analysis.mlWinProbability > 60 ? 'text-green-600' :
+                  analysis.mlWinProbability > 30 ? 'text-yellow-600' :
+                  'text-red-600'
+                }`}>
+                  {Math.round(analysis.mlWinProbability)}%
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  {analysis.mlWinProbability > 60 ? '🟢 Strong chance of winning with current bid strategy' :
+                   analysis.mlWinProbability > 30 ? '🟡 Moderate competition - strategic bidding needed' :
+                   '🔴 Low probability - high competition detected'}
+                </p>
+              </div>
+            )}
 
             {/* Auction Intelligence Summary */}
             <div className="grid grid-cols-2 gap-3">
@@ -393,32 +467,111 @@ export const AIInsightsPanel: React.FC<AIInsightsPanelProps> = ({
         {/* Probability Tab */}
         {activeTab === 'probability' && winningProbability && (
           <div className="p-4 space-y-4">
-            {/* Probability Gauge */}
-            <div className="text-center">
-              <div className="relative inline-flex items-center justify-center">
-                <div className="w-24 h-24 rounded-full border-8 border-muted relative">
-                  <div 
-                    className={`absolute top-0 left-0 w-24 h-24 rounded-full ${getProbabilityColor(winningProbability.winningProbability)} opacity-20`}
-                    style={{
-                      clipPath: `polygon(50% 50%, 50% 0%, ${50 + Math.sin((winningProbability.winningProbability / 100) * Math.PI) * 50}% ${50 - Math.cos((winningProbability.winningProbability / 100) * Math.PI) * 50}%, 50% 50%)`
-                    }}
-                  />
-                </div>
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <span className="text-2xl font-bold">{winningProbability.winningProbability}%</span>
-                </div>
+            {/* ML Badge */}
+            {winningProbability.mlSource && (
+              <div className="flex items-center justify-end">
+                <Badge variant="outline" className="text-xs bg-purple-500/10 border-purple-500/30 text-purple-600">
+                  🤖 {winningProbability.mlSource}
+                </Badge>
               </div>
-              <p className="text-sm text-muted-foreground mt-2">Winning Probability</p>
+            )}
+
+            {/* Large Probability Display */}
+            <div className={`rounded-lg p-6 text-center shadow-lg border-2 ${
+              winningProbability.winningProbability > 60 
+                ? 'bg-gradient-to-r from-green-500/10 to-emerald-500/10 border-green-500/40' :
+              winningProbability.winningProbability > 30 
+                ? 'bg-gradient-to-r from-yellow-500/10 to-amber-500/10 border-yellow-500/40' :
+                'bg-gradient-to-r from-red-500/10 to-orange-500/10 border-red-500/40'
+            }`}>
+              <p className="text-sm text-muted-foreground mb-2 font-semibold">Your Win Probability</p>
+              <div className={`text-5xl font-black mb-2 ${
+                winningProbability.winningProbability > 60 ? 'text-green-600' :
+                winningProbability.winningProbability > 30 ? 'text-yellow-600' :
+                'text-red-600'
+              }`}>
+                {Math.round(winningProbability.winningProbability)}%
+              </div>
+              <p className="text-sm text-muted-foreground">
+                {winningProbability.winningProbability > 60 
+                  ? '✅ Strong competitive position - high likelihood of success' :
+                 winningProbability.winningProbability > 30 
+                  ? '⚠️ Moderate competition - consider strategic bid increase' :
+                  '❌ Highly competitive - aggressive bidding required to win'}
+              </p>
+            </div>
+
+            {/* ML Predicted Price Display */}
+            {winningProbability.mlPredictedPrice && (
+              <div className="bg-gradient-to-r from-purple-500/10 to-blue-500/10 border-2 border-purple-500/40 rounded-lg p-4 shadow-lg">
+                <div className="flex items-start justify-between mb-1">
+                  <h4 className="font-bold text-lg flex items-center gap-2">
+                    <DollarSign className="w-5 h-5 text-purple-600" />
+                    ML Predicted Final Price
+                  </h4>
+                </div>
+                {(() => {
+                  const predictedPrice = winningProbability.mlPredictedPrice;
+                  const lowerBound = Math.max(0.75 * predictedPrice, 0);
+                  const upperBound = 1.25 * predictedPrice;
+                  return (
+                    <>
+                      <div className="text-3xl font-bold text-purple-600 mb-2">
+                        {Math.round(lowerBound)} - {Math.round(upperBound)} CR
+                      </div>
+                      <p className="text-sm text-muted-foreground mb-3">
+                        XGBoost regression model prediction based on current auction dynamics
+                      </p>
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* ML Explanation */}
+            <div className="bg-gradient-to-r from-purple-500/10 to-blue-500/10 border border-purple-500/20 rounded-lg p-4">
+              <h4 className="font-semibold mb-3 flex items-center gap-2">
+                <Brain className="w-4 h-4 text-purple-500" />
+                ML Model Analysis
+              </h4>
+              
+              {/* Top Winning Factors */}
+              {winningProbability.mlTopFeatures && winningProbability.mlTopFeatures.length > 0 && (
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold text-muted-foreground">Key Factors Influencing Win Probability:</p>
+                  <div className="space-y-2">
+                    {winningProbability.mlTopFeatures.slice(0, 3).map((feature, idx) => (
+                      <div key={idx} className="flex items-center justify-between text-xs">
+                        <span className="capitalize font-medium w-24">{feature.feature}</span>
+                        <div className="flex-1 mx-2 h-2.5 bg-muted rounded-full overflow-hidden">
+                          <div 
+                            className="h-full bg-blue-500"
+                            style={{ width: `${Math.min(parseFloat(feature.importance), 100)}%` }}
+                          />
+                        </div>
+                        <span className="text-muted-foreground font-semibold w-12 text-right">{feature.importance}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Explanation */}
             <div className="bg-secondary rounded-lg p-4">
               <h4 className="font-semibold mb-2 flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 text-primary" />
-                AI Analysis
+                Why This Probability?
               </h4>
               <p className="text-sm text-muted-foreground">{winningProbability.explanation}</p>
             </div>
+
+            {/* Actionable Tip */}
+            {winningProbability.actionableTip && (
+              <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-3">
+                <p className="text-sm text-blue-600 font-medium">💡 {winningProbability.actionableTip}</p>
+              </div>
+            )}
 
             {/* Current Status */}
             <div className="grid grid-cols-2 gap-3">
@@ -449,19 +602,6 @@ export const AIInsightsPanel: React.FC<AIInsightsPanelProps> = ({
                 <div className="flex items-center gap-2 text-sm">
                   <TrendingUp className="w-4 h-4 text-muted-foreground" />
                   <span>{auctionIntelligence.bidSpeed}</span>
-                </div>
-              </div>
-              
-              <div className="bg-gradient-to-r from-orange-500/10 to-red-500/10 border border-orange-500/20 rounded-lg p-3">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs text-muted-foreground">Competition Level</span>
-                  <Badge variant="destructive">
-                    {auctionIntelligence.bidWarProbability}%
-                  </Badge>
-                </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <Users className="w-4 h-4 text-muted-foreground" />
-                  <span>{activeBidders} bidders</span>
                 </div>
               </div>
             </div>

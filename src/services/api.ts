@@ -574,6 +574,20 @@ export const API_SERVICE = {
         return null;
       }
     },
+    getWinningProbabilityLLM: async (data: any, token: string) => {
+      try {
+        const response = await fetch(`${API_BASE}/ai/winning-probability-llm`, {
+          method: 'POST',
+          headers: authHeaders(token),
+          body: JSON.stringify(data),
+        });
+        if (response.ok) return response.json();
+        return null;
+      } catch (error) {
+        console.error('Error getting LLM winning probability:', error);
+        return null;
+      }
+    },
     getAuctionIntelligence: async (data: any, token: string) => {
       try {
         const response = await fetch(`${API_BASE}/ai/auction-intelligence`, {

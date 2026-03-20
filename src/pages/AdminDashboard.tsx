@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { API_SERVICE } from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
+import { useSocket } from "@/contexts/SocketContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -149,6 +150,36 @@ export default function AdminDashboard() {
     const interval = setInterval(fetchData, 60000);
     return () => clearInterval(interval);
   }, [authToken, user?.role]);
+
+  // Socket integration for real-time auction auto-close updates
+  const { socket } = useSocket();
+  
+  useEffect(() => {
+    if (!socket) return;
+
+    // When any auction ends (via sweeper auto-close or manual), refresh the list
+    const handleAuctionEnded = async (data: any) => {
+      console.log(`[ADMIN] Auction ${data.auctionId} ended, refreshing list...`);
+      
+      // Update the local auctions list immediately
+      setAuctions(prev => prev.map(a => 
+        String(a.id) === String(data.auctionId) 
+          ? { ...a, status: 'ended', current_bidder_name: data.winner?.username || a.current_bidder_name }
+          : a
+      ));
+
+      toast({
+        title: "🔨 Auction Auto-Closed",
+        description: data.message || `Auction #${data.auctionId} has ended.`,
+      });
+    };
+
+    socket.on('auction:ended', handleAuctionEnded);
+
+    return () => {
+      socket.off('auction:ended', handleAuctionEnded);
+    };
+  }, [socket, toast]);
 
   // Early returns AFTER all hooks (React Rules of Hooks)
   if (!user) {

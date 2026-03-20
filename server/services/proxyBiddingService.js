@@ -216,8 +216,9 @@ export const placeProxyBid = async (auctionId, proxyBidderId, bidAmount, proxyBi
     }
 
     // Check for anti-sniping - extend auction if bid placed in last 10 seconds
+    let wasExtended = false;
     if (io) {
-      const wasExtended = await checkAndExtendAuctionTime(auctionId, io);
+      wasExtended = await checkAndExtendAuctionTime(auctionId, io);
       if (wasExtended) {
         console.log(`[ANTI-SNIPING] Auction ${auctionId} extended due to last-second proxy bid by user ${proxyBidderId}`);
       }
